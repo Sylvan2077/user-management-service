@@ -1,4 +1,5 @@
 import os
+import json
 
 
 class Settings:
@@ -16,3 +17,8 @@ class Settings:
         self.sym_talk_host = os.environ.get(
             "SYM_TALK_HOST", "http://0.0.0.0:8080"
         )
+        nodes_env = os.environ.get("SYSTEM_USER_NODES", '[{"ip": "127.0.0.1", "port": 8888}]')
+        try:
+            self.system_user_nodes = json.loads(nodes_env)
+        except json.JSONDecodeError:
+            self.system_user_nodes = [{"ip": "127.0.0.1", "port": 8888}]

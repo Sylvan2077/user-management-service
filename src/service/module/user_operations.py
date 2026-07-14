@@ -1,6 +1,9 @@
 import os
 import shutil
 import subprocess
+import json
+
+import requests
 
 from src.common.logs import logger
 from src.common.temp_cache import TempCache
@@ -32,6 +35,54 @@ settings = config.Settings()
 vpn_config_path = settings.vpn_config_file_path
 
 
+def get_max_uid():
+    try:
+        result = subprocess.run(
+            ['awk', '-F:', '{print $3}', '/etc/passwd'],
+            capture_output=True, text=True
+        )
+        uids = [int(line.strip()) for line in result.stdout.split('\n') if line.strip().isdigit()]
+        if uids:
+            return max(uids)
+        return 1000
+    except Exception as e:
+        logger.error(f"获取最大UID失败: {e}")
+        return 1000
+
+
+def find_available_uid(start_uid=None):
+    import random
+    
+    if start_uid is None:
+        start_uid = get_max_uid()
+    
+    min_uid = 1100
+    if start_uid < min_uid:
+        logger.error(f"最大UID {start_uid} 小于最小UID {min_uid}")
+        return None
+    
+    uids = list(range(min_uid, start_uid + 1))
+    random.shuffle(uids)
+    
+    for uid in uids:
+        result = subprocess.run(['id', '-u', str(uid)], capture_output=True)
+        if result.returncode != 0:
+            return uid
+    return None
+
+
+def create_user_on_node(node_ip, node_port, username, uid):
+    try:
+        url = f"http://{node_ip}:{node_port}"
+        data = {"username": username, "uid": uid}
+        response = requests.post(url, json=data, timeout=30)
+        response_data = response.json()
+        return response_data.get("success", False), response_data.get("message", "")
+    except Exception as e:
+        logger.error(f"连接节点 {node_ip}:{node_port} 失败: {e}")
+        return False, str(e)
+
+
 def get_server_info():
     # 读取缓存文件中配置信息
     cache = TempCache()
@@ -49,38 +100,51 @@ def get_server_info():
 
 def create_system_user(user_name):
     """
-    创建系统用户
+    创建系统用户（多节点）
     """
 
     username = "caep_" + user_name
-    # 判断用户是否存在
-    exist_user = "id {}".format(username)
-    return_code = subprocess.call(exist_user, shell=True)
-    if return_code != 0:
-        # 生成随机系统密码
-        rand_passwd = rand_str(8)
-        subprocess.run("useradd {}".format(username), shell=True)
-        subprocess.run(
-            "echo {} | passwd --stdin {}".format(rand_passwd, username), shell=True
-        )
-        logger.info("创建系统用户:{}".format(username))
-
-    # 创建文件管理系统用户文件夹
-    user_data = os.path.join(settings.file_browser_data_dir, user_name + "_data")
-    if os.path.exists(user_data):
-        shutil.rmtree(user_data)
-    logger.info("创建文件管理系统用户文件夹:{}".format(user_data))
-    os.makedirs(user_data)
-    subprocess.run("chown -R {0}:{0} {1}".format(username, user_data), shell=True)
-    # 创建用户家目录下的数据文件夹，并软链接至文件管理系统用户文件夹
-    user_home_data_path = "/home/{}/data".format(username)
-    logger.info("创建用户家目录下的数据文件夹:{}，并软链接至文件管理系统用户文件夹".format(user_home_data_path))
-    # 创建软链接
-    subprocess.run("ln -s {} {}".format(user_data, user_home_data_path), shell=True)
-    # 修改所属组
-    subprocess.run(
-        "chown -h {0}:{0} {1}".format(username, user_home_data_path), shell=True
-    )
+    
+    uid = find_available_uid()
+    if uid is None:
+        logger.error("未找到可用的UID")
+        return "未找到可用的UID"
+    
+    failed_nodes = []
+    
+    for node in settings.system_user_nodes:
+        node_ip = node.get("ip")
+        node_port = node.get("port")
+        logger.info(f"在节点 {node_ip}:{node_port} 创建用户 {username} (UID: {uid})")
+        
+        success, message = create_user_on_node(node_ip, node_port, username, uid)
+        
+        if success:
+            logger.info(f"节点 {node_ip}:{node_port} 用户创建成功")
+        else:
+            logger.error(f"节点 {node_ip}:{node_port} 用户创建失败: {message}")
+            failed_nodes.append({"ip": node_ip, "port": node_port, "reason": message})
+    
+    if failed_nodes:
+        error_msg = f"部分节点创建失败: {json.dumps(failed_nodes)}"
+        logger.error(error_msg)
+        return error_msg
+    
+    # user_data = os.path.join(settings.file_browser_data_dir, user_name + "_data")
+    # if os.path.exists(user_data):
+    #     shutil.rmtree(user_data)
+    # logger.info("创建文件管理系统用户文件夹:{}".format(user_data))
+    # os.makedirs(user_data)
+    # subprocess.run("chown -R {0}:{0} {1}".format(username, user_data), shell=True)
+    
+    # user_home_data_path = "/home/{}/data".format(username)
+    # logger.info("创建用户家目录下的数据文件夹:{}，并软链接至文件管理系统用户文件夹".format(user_home_data_path))
+    # subprocess.run("ln -s {} {}".format(user_data, user_home_data_path), shell=True)
+    # subprocess.run(
+    #     "chown -h {0}:{0} {1}".format(username, user_home_data_path), shell=True
+    # )
+    
+    return None
 
 
 def user_register(user_name, user_passwd):
@@ -129,9 +193,8 @@ def user_register(user_name, user_passwd):
             return message
         sym_talk_user_id = response_info.get("user_id")
     # 创建系统用户
-    try:
-        create_system_user(user_name)
-    except Exception as e:
+    msg = create_system_user(user_name)
+    if msg:
         # 删除文件管理系统用户
         if fb_flag:
             delete_filebrowser_user(user_name)
@@ -141,8 +204,8 @@ def user_register(user_name, user_passwd):
         # 删除用户论坛用户
         if sym_flag:
             delete_sym_talk_user(sym_talk_user_id)
-        logger.error(e)
-        return e
+        logger.error(msg)
+        return msg
     return
 
 
@@ -439,10 +502,9 @@ def update_user(form_data):
                 else:
                     user_id = response_info.get("user_id")
                 # 判断系统用户是否存在，不存在则创建
-                try:
-                    create_system_user(username)
-                except Exception:
-                    created_failed.append({"username": username, "reason": "创建系统用户失败"})
+                msg = create_system_user(username)
+                if msg:
+                    created_failed.append({"username": username, "reason": f"创建系统用户失败: {msg}"})
                     continue
                 # 创建成功后更新
                 created_success.update(
