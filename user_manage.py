@@ -8,56 +8,6 @@ import random
 import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-def get_max_uid():
-    print("[DEBUG] 开始获取系统最大UID...")
-    try:
-        result = subprocess.run(
-            ['awk', '-F:', '{print $3}', '/etc/passwd'],
-            capture_output=True, text=True
-        )
-        uids = [int(line.strip()) for line in result.stdout.split('\n') if line.strip().isdigit()]
-        if uids:
-            max_uid = max(uids)
-            print(f"[DEBUG] 成功获取系统最大UID: {max_uid}")
-            return max_uid
-        print("[DEBUG] 未找到UID，使用默认值1000")
-        return 1000
-    except Exception as e:
-        print(f"[ERROR] 获取最大UID失败: {e}")
-        return 1000
-
-def find_available_uid():
-    min_uid = 1100
-    max_uid = get_max_uid()
-    print(f"[DEBUG] UID搜索范围: min={min_uid}, max={max_uid}")
-    
-    if max_uid < min_uid:
-        print(f"[DEBUG] 最大UID({max_uid})小于最小UID({min_uid})，从{min_uid}开始顺序查找")
-    else:
-        uids = list(range(min_uid, max_uid + 1))
-        print(f"[DEBUG] 生成UID列表，共{len(uids)}个候选UID")
-        random.shuffle(uids)
-        print(f"[DEBUG] 随机打乱UID顺序，开始遍历查找可用UID...")
-        
-        for uid in uids:
-            result = subprocess.run(['id', '-u', str(uid)], capture_output=True)
-            if result.returncode != 0:
-                print(f"[DEBUG] 找到可用UID: {uid}")
-                return uid
-        print(f"[DEBUG] 在{min_uid}-{max_uid}范围内未找到可用UID")
-    
-    print(f"[DEBUG] 从{min_uid}开始向上顺序查找可用UID...")
-    uid = min_uid
-    while uid < 65535:
-        result = subprocess.run(['id', '-u', str(uid)], capture_output=True)
-        if result.returncode != 0:
-            print(f"[DEBUG] 找到可用UID: {uid}")
-            return uid
-        uid += 1
-    
-    print("[ERROR] 未找到可用UID（已达最大限制65535）")
-    return None
-
 def execute_script(script_path, *args):
     print(f"[DEBUG] 准备执行脚本: {script_path}")
     print(f"[DEBUG] 脚本参数: {args}")
@@ -98,6 +48,7 @@ class CreateUserHandler(BaseHTTPRequestHandler):
             
             username = data.get('username')
             mode = data.get('mode')
+            uid = data.get('uid')  # 获取可选的UID参数
             print(f"[DEBUG] 提取参数: username={username}, mode={mode}")
             
             if not username or not mode:
@@ -115,21 +66,7 @@ class CreateUserHandler(BaseHTTPRequestHandler):
             print(f"[DEBUG] 脚本目录: {script_dir}")
             
             if mode == 'create':
-                print("[DEBUG] 模式: 创建用户")
-                uid = find_available_uid()
-                print(f"[DEBUG] 获取到可用UID: {uid}")
-                
-                if uid is None:
-                    print("[ERROR] 未找到可用UID")
-                    self.send_response(400)
-                    self.send_header('Content-Type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        'success': False,
-                        'message': 'No available UID found'
-                    }).encode('utf-8'))
-                    return
-                
+                print("[DEBUG] 模式: 创建用户")    
                 script_path = os.path.join(script_dir, 'user_create.sh')
                 print(f"[DEBUG] 用户创建脚本路径: {script_path}")
                 result = execute_script(script_path, username, str(uid))
