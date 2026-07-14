@@ -34,47 +34,10 @@ from src.service.module.vpn_manager import (
 settings = config.Settings()
 vpn_config_path = settings.vpn_config_file_path
 
-
-def get_max_uid():
-    try:
-        result = subprocess.run(
-            ['awk', '-F:', '{print $3}', '/etc/passwd'],
-            capture_output=True, text=True
-        )
-        uids = [int(line.strip()) for line in result.stdout.split('\n') if line.strip().isdigit()]
-        if uids:
-            return max(uids)
-        return 1000
-    except Exception as e:
-        logger.error(f"获取最大UID失败: {e}")
-        return 1000
-
-
-def find_available_uid(start_uid=None):
-    import random
-    
-    if start_uid is None:
-        start_uid = get_max_uid()
-    
-    min_uid = 1100
-    if start_uid < min_uid:
-        logger.error(f"最大UID {start_uid} 小于最小UID {min_uid}")
-        return None
-    
-    uids = list(range(min_uid, start_uid + 1))
-    random.shuffle(uids)
-    
-    for uid in uids:
-        result = subprocess.run(['id', '-u', str(uid)], capture_output=True)
-        if result.returncode != 0:
-            return uid
-    return None
-
-
-def create_user_on_node(node_ip, node_port, username, uid):
+def create_user_on_node(node_ip, node_port, username):
     try:
         url = f"http://{node_ip}:{node_port}"
-        data = {"username": username, "uid": uid}
+        data = {"username": username, "mode": "create"}
         response = requests.post(url, json=data, timeout=30)
         response_data = response.json()
         return response_data.get("success", False), response_data.get("message", "")
@@ -105,19 +68,14 @@ def create_system_user(user_name):
 
     username = "caep_" + user_name
     
-    uid = find_available_uid()
-    if uid is None:
-        logger.error("未找到可用的UID")
-        return "未找到可用的UID"
-    
     failed_nodes = []
     
     for node in settings.system_user_nodes:
         node_ip = node.get("ip")
         node_port = node.get("port")
-        logger.info(f"在节点 {node_ip}:{node_port} 创建用户 {username} (UID: {uid})")
+        logger.info(f"在节点 {node_ip}:{node_port} 创建用户 {username}")
         
-        success, message = create_user_on_node(node_ip, node_port, username, uid)
+        success, message = create_user_on_node(node_ip, node_port, username)
         
         if success:
             logger.info(f"节点 {node_ip}:{node_port} 用户创建成功")
@@ -129,20 +87,6 @@ def create_system_user(user_name):
         error_msg = f"部分节点创建失败: {json.dumps(failed_nodes)}"
         logger.error(error_msg)
         return error_msg
-    
-    # user_data = os.path.join(settings.file_browser_data_dir, user_name + "_data")
-    # if os.path.exists(user_data):
-    #     shutil.rmtree(user_data)
-    # logger.info("创建文件管理系统用户文件夹:{}".format(user_data))
-    # os.makedirs(user_data)
-    # subprocess.run("chown -R {0}:{0} {1}".format(username, user_data), shell=True)
-    
-    # user_home_data_path = "/home/{}/data".format(username)
-    # logger.info("创建用户家目录下的数据文件夹:{}，并软链接至文件管理系统用户文件夹".format(user_home_data_path))
-    # subprocess.run("ln -s {} {}".format(user_data, user_home_data_path), shell=True)
-    # subprocess.run(
-    #     "chown -h {0}:{0} {1}".format(username, user_home_data_path), shell=True
-    # )
     
     return None
 
@@ -415,14 +359,28 @@ def delete_user(names):
             msg = delete_vpn_user(user_name)
             if msg:
                 reason.append("删除VPN用户失败")
-        # 如果有进程正在被该用户使用,先关闭进程
-        subprocess.run("pkill -u {}".format("caep_" + user_name), shell=True)
-        # 删除用户
-        subprocess.run("userdel -r {}".format("caep_" + user_name), shell=True)
+        # 调用HTTP服务删除系统用户
+        username = "caep_" + user_name
+        delete_failed_nodes = []
+        for node in settings.system_user_nodes:
+            node_ip = node.get("ip")
+            node_port = node.get("port")
+            try:
+                url = f"http://{node_ip}:{node_port}"
+                data = {"username": username, "mode": "del"}
+                response = requests.post(url, json=data, timeout=30)
+                response_data = response.json()
+                if not response_data.get("success"):
+                    delete_failed_nodes.append({"ip": node_ip, "port": node_port, "reason": response_data.get("message", "删除失败")})
+            except Exception as e:
+                delete_failed_nodes.append({"ip": node_ip, "port": node_port, "reason": str(e)})
+        
+        if delete_failed_nodes:
+            reason.append(f"删除系统用户失败: {json.dumps(delete_failed_nodes)}")
         # 删除文件管理系统的用户文件夹
-        user_data = os.path.join(settings.file_browser_data_dir, user_name + "_data")
-        if os.path.exists(user_data):
-            shutil.rmtree(user_data)
+        # user_data = os.path.join(settings.file_browser_data_dir, user_name + "_data")
+        # if os.path.exists(user_data):
+        #     shutil.rmtree(user_data)
         # 删除用户turbo-vnc相关文件
         turbo_vnc_tmp_path = "/tmp/turbo-vnc/caep_{}-vnc".format(user_name)
         if os.path.exists(turbo_vnc_tmp_path):
