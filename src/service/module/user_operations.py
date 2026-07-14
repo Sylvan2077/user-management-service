@@ -159,16 +159,16 @@ def user_register(user_name, user_passwd):
         if message:
             logger.error(message)
             return message
-    # 创建VPN用户
-    if vpn_flag:
-        logger.info("创建VPN用户:{}".format(user_name))
-        msg = create_vpn_user(user_name, user_passwd)
-        if msg:
-            if fb_flag:
-                # 删除文件管理系统用户
-                delete_filebrowser_user(user_name)
-            logger.error(msg)
-            return msg
+    # TODO 以后改为前后端控制 创建VPN用户
+    # if vpn_flag:
+    logger.info("创建VPN用户:{}".format(user_name))
+    msg = create_vpn_user(user_name, user_passwd)
+    if msg:
+        if fb_flag:
+            # 删除文件管理系统用户
+            delete_filebrowser_user(user_name)
+        logger.error(msg)
+        return msg
     # 创建用户论坛用户
     sym_talk_user_id = ""
     if sym_flag:
@@ -409,6 +409,9 @@ def delete_user(names):
         # 调用HTTP服务删除系统用户
         username = "caep_" + user_name
         delete_failed_nodes = []
+        delete_success_count = 0
+        total_nodes = len(settings.system_user_nodes)
+        
         for node in settings.system_user_nodes:
             node_ip = node.get("ip")
             node_port = node.get("port")
@@ -417,13 +420,19 @@ def delete_user(names):
                 data = {"username": username, "mode": "del"}
                 response = requests.post(url, json=data, timeout=30)
                 response_data = response.json()
-                if not response_data.get("success"):
+                if response_data.get("success"):
+                    delete_success_count += 1
+                else:
                     delete_failed_nodes.append({"ip": node_ip, "port": node_port, "reason": response_data.get("message", "删除失败")})
             except Exception as e:
                 delete_failed_nodes.append({"ip": node_ip, "port": node_port, "reason": str(e)})
         
-        if delete_failed_nodes:
-            reason.append(f"删除系统用户失败: {json.dumps(delete_failed_nodes)}")
+        # 只要有一个节点删除成功就认为成功
+        if delete_success_count == 0:
+            reason.append(f"所有节点删除系统用户失败: {json.dumps(delete_failed_nodes)}")
+        elif delete_failed_nodes:
+            # 部分节点失败，记录警告信息但不阻止删除流程
+            logger.warning(f"部分节点删除系统用户失败: {json.dumps(delete_failed_nodes)}")
         # 删除文件管理系统的用户文件夹
         # user_data = os.path.join(settings.file_browser_data_dir, user_name + "_data")
         # if os.path.exists(user_data):
