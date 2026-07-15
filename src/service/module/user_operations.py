@@ -115,7 +115,7 @@ def create_system_user(user_name):
 
     username = "caep_" + user_name
     
-    failed_nodes = []
+    success_nodes = []
     
     for node in settings.system_user_nodes:
         node_ip = node.get("ip")
@@ -126,14 +126,15 @@ def create_system_user(user_name):
         
         if success:
             logger.info(f"节点 {node_ip}:{node_port} 用户创建成功")
+            success_nodes.append({"ip": node_ip, "port": node_port})
         else:
             logger.error(f"节点 {node_ip}:{node_port} 用户创建失败: {message}")
-            failed_nodes.append({"ip": node_ip, "port": node_port, "reason": message})
-    
-    if failed_nodes:
-        error_msg = f"部分节点创建失败: {json.dumps(failed_nodes)}"
-        logger.error(error_msg)
-        return error_msg
+            if success_nodes:
+                logger.info(f"回退已创建的用户 {username}")
+                delete_user(user_name)
+            error_msg = f"节点 {node_ip}:{node_port} 用户创建失败: {message}"
+            logger.error(error_msg)
+            return error_msg
     
     return None
 
